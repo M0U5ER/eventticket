@@ -1,0 +1,5 @@
+-- Initialize 4 isolated databases for EventTicket microservices (Database per Service)
+CREATE DATABASE event_db;
+CREATE DATABASE booking_db;
+CREATE DATABASE payment_db;
+CREATE DATABASE ticket_db;

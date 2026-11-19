@@ -1,0 +1,214 @@
+name: eventticket
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: eventticket-postgres
+    environment:
+      POSTGRES_USER: eventticket
+      POSTGRES_PASSWORD: eventticket
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./infra/postgres/init-dbs.sql:/docker-entrypoint-initdb.d/init-dbs.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U eventticket -d postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - eventticket-net
+
+  kafka:
+    image: apache/kafka:3.7.0
+    container_name: eventticket-kafka
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093,PLAINTEXT_HOST://:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092,PLAINTEXT_HOST://localhost:29092
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT,PLAINTEXT_HOST:PLAINTEXT
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+      KAFKA_NUM_PARTITIONS: 3
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+    ports:
+      - "9092:9092"
+      - "29092:29092"
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD-SHELL", "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 12
+    networks:
+      - eventticket-net
+
+  kafka-init:
+    image: apache/kafka:3.7.0
+    container_name: eventticket-kafka-init
+    depends_on:
+      kafka:
+        condition: service_healthy
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    volumes:
+      - ./infra/kafka/create-topics.sh:/create-topics.sh:ro
+    entrypoint: ["sh", "/create-topics.sh"]
+    restart: "no"
+    networks:
+      - eventticket-net
+
+  kafka-ui:
+    image: provectuslabs/kafka-ui:latest
+    container_name: eventticket-kafka-ui
+    depends_on:
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      KAFKA_CLUSTERS_0_NAME: eventticket-local
+      KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:9092
+    ports:
+      - "8080:8080"
+    networks:
+      - eventticket-net
+
+  event-service:
+    build:
+      context: .
+      dockerfile: services/event-service/Dockerfile
+    container_name: eventticket-event-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgresql+asyncpg://eventticket:eventticket@postgres:5432/event_db
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      ENABLE_KAFKA: "true"
+    ports:
+      - "8001:8001"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - eventticket-net
+
+  booking-service:
+    build:
+      context: .
+      dockerfile: services/booking-service/Dockerfile
+    container_name: eventticket-booking-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+      event-service:
+        condition: service_healthy
+    environment:
+      BOOKING_DATABASE_URL: postgresql+asyncpg://eventticket:eventticket@postgres:5432/booking_db
+      BOOKING_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      BOOKING_EVENT_SERVICE_URL: http://event-service:8001
+    ports:
+      - "8002:8002"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - eventticket-net
+
+  payment-service:
+    build:
+      context: .
+      dockerfile: services/payment-service/Dockerfile
+    container_name: eventticket-payment-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      PAYMENT_DATABASE_URL: postgresql+asyncpg://eventticket:eventticket@postgres:5432/payment_db
+      PAYMENT_KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    ports:
+      - "8003:8003"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - eventticket-net
+
+  ticket-notification-service:
+    build:
+      context: .
+      dockerfile: services/ticket-notification-service/Dockerfile
+    container_name: eventticket-ticket-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka-init:
+        condition: service_completed_successfully
+    environment:
+      DATABASE_URL: postgresql+asyncpg://eventticket:eventticket@postgres:5432/ticket_db
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    ports:
+      - "8004:8004"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8004/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - eventticket-net
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: services/api-gateway/Dockerfile
+    container_name: eventticket-api-gateway
+    depends_on:
+      event-service:
+        condition: service_healthy
+      booking-service:
+        condition: service_healthy
+      payment-service:
+        condition: service_healthy
+      ticket-notification-service:
+        condition: service_healthy
+    environment:
+      GATEWAY_EVENT_SERVICE_URL: http://event-service:8001
+      GATEWAY_BOOKING_SERVICE_URL: http://booking-service:8002
+      GATEWAY_PAYMENT_SERVICE_URL: http://payment-service:8003
+      GATEWAY_TICKET_SERVICE_URL: http://ticket-notification-service:8004
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - eventticket-net
+
+volumes:
+  pg_data:
+  kafka_data:
+
+networks:
+  eventticket-net:
+    driver: bridge

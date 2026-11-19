@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import httpx
 from fastapi import FastAPI
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
 from app.routes import router
@@ -41,6 +44,13 @@ def create_app(http_client: httpx.AsyncClient | None = None) -> FastAPI:
     }
     if http_client is not None:
         app.state.http_client = http_client
+
+    static_dir = Path(__file__).resolve().parent / "static"
+    app.mount("/static", StaticFiles(directory=static_dir), name="static")
+
+    @app.get("/", include_in_schema=False)
+    async def index() -> FileResponse:
+        return FileResponse(static_dir / "index.html")
 
     app.include_router(router)
     return app

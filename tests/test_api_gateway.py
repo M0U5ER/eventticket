@@ -163,3 +163,19 @@ async def test_proxy_returns_502_and_504_on_downstream_errors(gateway_client):
     app.state.service_urls["booking-service"] = "http://slow-service:8002"
     r_slow = await client.get("/api/bookings")
     assert r_slow.status_code == 504
+
+
+@pytest.mark.asyncio
+async def test_web_ui_served_at_root(gateway_client):
+    client, _, _ = gateway_client
+
+    r_index = await client.get("/")
+    assert r_index.status_code == 200
+    assert "text/html" in r_index.headers["content-type"]
+    assert "EventTicket" in r_index.text
+
+    r_css = await client.get("/static/styles.css")
+    assert r_css.status_code == 200
+
+    r_js = await client.get("/static/app.js")
+    assert r_js.status_code == 200
